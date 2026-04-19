@@ -1993,22 +1993,25 @@ function batchDeleteDaily(){
 }
 
 // 删除某日某项目下所有矿池记录（整行合计删除）
-function delDailyGroup(dt,projId){
+async function delDailyGroup(dt,projId){
   if(!IS_LOGGED_IN)return;
   if(!confirm(`确认删除 ${dt} 该项目的全部日报数据？`))return;
   const bids=getProjectBids(projId);
-  const before=DAILY.length;
+  const toDelete=DAILY.filter(d=>d.dt===dt&&bids.includes(d.bid));
+  // 日报 ID = dt_bid_brand_acct
+  await Promise.all(toDelete.map(d=>_sbDeleteById('daily',`${d.dt}_${d.bid}_${d.brand}_${d.acct}`)));
   DAILY.splice(0,DAILY.length,...DAILY.filter(d=>!(d.dt===dt&&bids.includes(d.bid))));
   EXPANDED.delete(dt+'|'+projId);
-  renderDaily();
+  saveData();renderDaily();
 }
 // 删除单条矿池记录（展开后的子行）
-function delDailyRecord(dt,bid,brand,acct){
+async function delDailyRecord(dt,bid,brand,acct){
   if(!IS_LOGGED_IN)return;
   if(!confirm(`确认删除 ${dt} ${brand}/${acct} 的数据？`))return;
+  await _sbDeleteById('daily',`${dt}_${bid}_${brand}_${acct}`);
   const idx=DAILY.findIndex(d=>d.dt===dt&&d.bid===bid&&d.brand===brand&&d.acct===acct);
   if(idx>=0)DAILY.splice(idx,1);
-  renderDaily();
+  saveData();renderDaily();
 }
 
 // ── 编辑日报 ──
@@ -2844,7 +2847,7 @@ function _toNum(v){
 }
 function _thisMonthStart(){const d=new Date();return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-01`;}
 function _thisMonthEnd(){const d=new Date();const end=new Date(d.getFullYear(),d.getMonth()+1,0);return `${end.getFullYear()}-${String(end.getMonth()+1).padStart(2,'0')}-${String(end.getDate()).padStart(2,'0')}`;}
-function delCoolMeter(id){if(!IS_LOGGED_IN)return;if(confirm('确认删除？')){COOL_METERS=COOL_METERS.filter(m=>m.id!==id);renderCoolMeters()}}
+async function delCoolMeter(id){if(!IS_LOGGED_IN)return;if(confirm('确认删除？')){await _sbDeleteById('cool_meters',id);COOL_METERS=COOL_METERS.filter(m=>m.id!==id);saveData();renderCoolMeters()}}
 
 // ─── BASE DATA — one row per project, boxes inline ───
 function renderBaseTable(){
@@ -3080,11 +3083,12 @@ function prepProjPoolModal(pid){
   setPoolRole('primary');
 }
 // 删除矿池账号
-function delPool(id){
+async function delPool(id){
   if(!IS_LOGGED_IN)return;
   if(!confirm('确认删除此矿池账号？'))return;
+  await _sbDeleteById('pools',id);
   POOLS=POOLS.filter(p=>p.id!==id);
-  renderBaseTable();
+  saveData();renderBaseTable();
 }
 function addPool(){
   if(!IS_LOGGED_IN)return;
@@ -3341,7 +3345,7 @@ function addClient(){
   closeM('m-client');renderBaseTable();
   document.getElementById('cn').value='';document.getElementById('cc').value='';document.getElementById('cno').value='';
 }
-function delClient(id){if(!IS_LOGGED_IN)return;if(confirm('确认删除该客户？')){CLIENTS=CLIENTS.filter(c=>c.id!==id);renderBaseTable()}}
+async function delClient(id){if(!IS_LOGGED_IN)return;if(confirm('确认删除该客户？')){await _sbDeleteById('clients',id);CLIENTS=CLIENTS.filter(c=>c.id!==id);saveData();renderBaseTable()}}
 
 // ─── 统一项目配置编辑 ───
 let _pcfgPid=null;
@@ -3522,7 +3526,7 @@ function saveProject(){
   }
   closeM('m-project');renderBaseTable();renderCfgTable();
 }
-function delProjFull(pid){
+async function delProjFull(pid){
   if(!IS_LOGGED_IN)return;
   const proj=PROJECTS.find(p=>p.id===pid);
   if(!proj)return;
@@ -3532,6 +3536,16 @@ function delProjFull(pid){
   const poolCount=POOLS.filter(p=>bids.includes(p.bid)).length;
   const shareCount=SHARES.filter(s=>s.pid===pid).length;
   if(!confirm(`确认删除项目「${proj.cno||proj.name}」？\n同时删除：矿箱 ${bids.length} 个、矿池 ${poolCount} 个、机型 ${specCount} 条、电费 ${elecCount} 条、份额 ${shareCount} 条。\n此操作不可撤销。`))return;
+  // 逐一精准删除关联记录
+  await _sbDeleteById('projects',pid);
+  await Promise.all([
+    ...bids.map(bid=>_sbDeleteById('boxes',bid)),
+    ...POOLS.filter(p=>bids.includes(p.bid)).map(p=>_sbDeleteById('pools',p.id)),
+    ...SPECS.filter(s=>s.pid===pid).map(s=>_sbDeleteById('specs',s.id)),
+    ...ELEC.filter(e=>e.pid===pid).map(e=>_sbDeleteById('elec',e.id)),
+    ...SHARES.filter(s=>s.pid===pid).map(s=>_sbDeleteById('shares',s.id)),
+    ...COOL_METERS.filter(m=>m.pid===pid).map(m=>_sbDeleteById('cool_meters',m.id)),
+  ]);
   PROJECTS=PROJECTS.filter(p=>p.id!==pid);
   POOLS=POOLS.filter(p=>!bids.includes(p.bid));
   BOXES=BOXES.filter(b=>b.pid!==pid);
@@ -3539,7 +3553,7 @@ function delProjFull(pid){
   ELEC=ELEC.filter(e=>e.pid!==pid);
   SHARES=SHARES.filter(s=>s.pid!==pid);
   COOL_METERS=COOL_METERS.filter(m=>m.pid!==pid);
-  renderCfgTable();renderBaseTable();renderDash();
+  saveData();renderCfgTable();renderBaseTable();renderDash();
 }
 function delProj(id){delProjFull(id);}
 function prepBoxModal(prePid){
@@ -3579,15 +3593,16 @@ function saveBox(){
   }
   closeM('m-box');renderBaseTable();
 }
-function delBox(id){
+async function delBox(id){
   if(!IS_LOGGED_IN)return;
-  if(!IS_LOGGED_IN)return;
-  const poolCount=POOLS.filter(p=>p.bid===id).length;
-  const msg=poolCount?`确认删除该矿箱？\n同时删除关联矿池账号 ${poolCount} 个。`:'确认删除该矿箱？';
+  const poolIds=POOLS.filter(p=>p.bid===id).map(p=>p.id);
+  const msg=poolIds.length?`确认删除该矿箱？\n同时删除关联矿池账号 ${poolIds.length} 个。`:'确认删除该矿箱？';
   if(!confirm(msg))return;
+  await Promise.all(poolIds.map(pid=>_sbDeleteById('pools',pid)));
+  await _sbDeleteById('boxes',id);
   POOLS=POOLS.filter(p=>p.bid!==id);
   BOXES=BOXES.filter(b=>b.id!==id);
-  renderBaseTable();
+  saveData();renderBaseTable();
 }
 function editCoolMeter(id){
   if(!IS_LOGGED_IN)return;
@@ -3634,7 +3649,7 @@ function addSpec(){
   SPECS.push({id:String(Date.now()),pid,model:document.getElementById('spmodel').value,cnt:parseInt(document.getElementById('spcnt').value)||0,th:parseFloat(document.getElementById('spth').value)||0,jth:parseFloat(document.getElementById('spjth').value)||0,from:document.getElementById('spfrom').value,to:null});
   closeM('m-spec');renderCfgTable();
 }
-function delSpec(id){if(!IS_LOGGED_IN)return;if(confirm('确认删除？')){SPECS=SPECS.filter(s=>s.id!==id);renderCfgTable()}}
+async function delSpec(id){if(!IS_LOGGED_IN)return;if(confirm('确认删除？')){await _sbDeleteById('specs',id);SPECS=SPECS.filter(s=>s.id!==id);saveData();renderCfgTable()}}
 
 function prepElecModal(prePid){
   const sel=document.getElementById('el-proj');
@@ -3648,7 +3663,7 @@ function addElec(){
   ELEC.push({id:String(Date.now()),pid,date:document.getElementById('elfrom').value,avg:parseFloat(document.getElementById('elavg').value)||DEFAULT_EP_USD,loss:parseFloat(document.getElementById('elloss').value)||DEFAULT_LOSS_PCT,note:document.getElementById('elnote').value});
   closeM('m-elec');renderCfgTable();
 }
-function delElec(id){if(!IS_LOGGED_IN)return;if(confirm('确认删除？')){ELEC=ELEC.filter(e=>e.id!==id);renderCfgTable()}}
+async function delElec(id){if(!IS_LOGGED_IN)return;if(confirm('确认删除？')){await _sbDeleteById('elec',id);ELEC=ELEC.filter(e=>e.id!==id);saveData();renderCfgTable()}}
 
 // ─── IMPORT ───
 let IMP_PARSED=[];  // parsed records ready to import
@@ -6161,11 +6176,12 @@ function updateSharePct(id,val){
   renderSharesList();
   renderBaseTable();renderDash();
 }
-function delShare(id){
+async function delShare(id){
   if(!IS_LOGGED_IN)return;
   if(!confirm('确认删除此份额？'))return;
+  await _sbDeleteById('shares',id);
   SHARES=SHARES.filter(s=>s.id!==id);
-  renderSharesList();
+  saveData();renderSharesList();
   renderBaseTable();renderDash();renderCfgTable();
 }
 
