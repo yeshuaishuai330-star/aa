@@ -5555,7 +5555,6 @@ function renderElecPay(){
   const statusF=document.getElementById('ep-status')?.value||'';
 
   // ── KPI：按当前模式独立统计 ──
-  const _kpiInGroup=new Set(_epCustomGroups.flatMap(g=>g.payIds));
   let sumTotal=0,sumUnpaid=0,sumPaid=0,kpiCount=0;
   if(_epMode==='combined'){
     // 合并模式：只统计归入合并组的周期，按组数计数
@@ -5574,8 +5573,8 @@ function renderElecPay(){
     });
     document.getElementById('ep-k1').textContent=kpiCount+'（组）';
   } else {
-    // 分开模式：只统计未归入任何合并组的周期
-    const sepPays=PAYMENTS.filter(p=>(!projF||p.pid===projF)&&!_kpiInGroup.has(p.id));
+    // 分开模式：统计所有周期（含已归入合并组的，分开结算是明细视图）
+    const sepPays=PAYMENTS.filter(p=>(!projF||p.pid===projF));
     kpiCount=sepPays.length;
     sepPays.forEach(p=>{const c=getPayCalc(p);sumTotal+=c.totalCost;if(p.paid)sumPaid+=c.totalCost;else sumUnpaid+=c.totalCost;});
     document.getElementById('ep-k1').textContent=kpiCount;
@@ -5608,11 +5607,9 @@ function renderElecPay(){
 
   let html='';
   projsWithData.forEach(proj=>{
-    // 找该项目的所有 PAYMENT 记录（按支付状态筛选，排除已归入合并组的）
-    const _inAnyGroup=new Set(_epCustomGroups.flatMap(g=>g.payIds));
+    // 找该项目的所有 PAYMENT 记录（按支付状态筛选，分开结算显示全部）
     let projPays=PAYMENTS.filter(pay=>{
       if(pay.pid!==proj.id)return false;
-      if(_inAnyGroup.has(pay.id))return false; // 已在合并组中，不在分开模式显示
       if(statusF==='paid'&&!pay.paid)return false;
       if(statusF==='unpaid'&&pay.paid)return false;
       return true;
