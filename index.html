@@ -715,7 +715,7 @@ tr:hover td{background:rgba(255,255,255,.02)}
   <!-- 合并结算操作栏（仅合并模式显示） -->
   <div id="ep-merge-bar" style="display:none;align-items:center;gap:10px;padding:7px 12px;margin-bottom:8px;background:rgba(56,139,253,.1);border:1px solid rgba(56,139,253,.3);border-radius:8px;font-size:12px">
     <span style="color:var(--blue);font-weight:600">✓ 已选 <span id="ep-sel-count">0</span> 个周期</span>
-    <button class="btn btn-p" style="font-size:12px;padding:4px 14px" onclick="mergeSelectedPayments()">合并所选</button>
+    <button class="btn btn-p" style="font-size:12px;padding:4px 14px" onclick="openBatchPayModal()">合并所选</button>
     <button class="btn" style="font-size:12px;padding:4px 10px" onclick="clearEpSelection()">取消选择</button>
     <span style="color:var(--text3);font-size:11px">选中同一合作方的多个项目编号，点击「合并所选」一起结算</span>
   </div>
@@ -1966,7 +1966,7 @@ function updateBatchCount(){
     else{allChk.indeterminate=true;}
   }
 }
-function batchDeleteDaily(){
+async function batchDeleteDaily(){
   if(!IS_LOGGED_IN)return;
   const selected=[...document.querySelectorAll('.daily-chk:checked')];
   if(!selected.length)return;
@@ -1977,14 +1977,17 @@ function batchDeleteDaily(){
     return `${g.dt||'?'} / ${proj.cno||g.projId||'?'}`;
   }).join('\n');
   if(!confirm(`确认批量删除以下 ${keys.length} 条日报记录？\n\n${summary}\n\n此操作不可撤销！`))return;
+  const allIds=[];
   keys.forEach(key=>{
     const g=_dailyGroupsMap.get(key);
     if(!g)return;
-    // 直接从 DAILY 中删除这些记录对象（用引用比较）
+    g.records.forEach(d=>allIds.push(`${d.dt}_${d.bid}_${d.brand}_${d.acct}`));
     const toRemove=new Set(g.records);
     DAILY.splice(0,DAILY.length,...DAILY.filter(d=>!toRemove.has(d)));
     EXPANDED.delete(key);
   });
+  await Promise.all(allIds.map(id=>_sbDeleteById('daily',id)));
+  saveData();
   const allChk=document.getElementById('chk-all-daily');
   if(allChk){allChk.checked=false;allChk.indeterminate=false;}
   const btn=document.getElementById('btn-batch-del');
@@ -3187,10 +3190,22 @@ function renderDash(){
     if (csM && csM.value !== selM) csM.value = selM;
   }
 
-  // KPI 计算
-  const totalBtc = periodData.reduce((s,d) => s+d.btc, 0);
-  const totalRev = periodData.reduce((s,d) => s+d.btc*getBtcPrice(d.dt,d.bp), 0);
-  const totalCost = periodData.reduce((s,d) => s+calcRow(d).cost, 0);
+  // KPI 计算 — 按"日期+项目"分组后用 calcGroup，与结算逻辑保持一致，避免多矿池重复计算冷塔
+  const dashGroups = new Map();
+  periodData.forEach(d => {
+    const box = BOXES.find(b=>b.id===d.bid)||{};
+    const projId = box.pid||'';
+    const key = d.dt+'|'+projId;
+    if(!dashGroups.has(key)) dashGroups.set(key,{dt:d.dt,projId,records:[]});
+    dashGroups.get(key).records.push(d);
+  });
+  let totalBtc=0, totalRev=0, totalCost=0;
+  dashGroups.forEach(({dt,projId,records}) => {
+    const c = calcGroup(records, projId);
+    totalBtc  += c.total_btc;
+    totalRev  += c.rev;
+    totalCost += c.cost;
+  });
 
   document.getElementById('k2').textContent = totalBtc.toFixed(4);
   document.getElementById('k3').textContent = '$'+fmtN(totalRev,0);
@@ -3226,7 +3241,8 @@ function renderDash(){
   }
   const k4sub = document.getElementById('k4-sub');
   if (k4sub) {
-    const avgDaily = periodData.length ? totalCost / [...new Set(periodData.map(d=>d.dt))].length : 0;
+    const days = dashGroups.size>0 ? [...new Set([...dashGroups.keys()].map(k=>k.split('|')[0]))].length : 0;
+    const avgDaily = days>0 ? totalCost/days : 0;
     k4sub.textContent = avgDaily > 0 ? `日均 $${fmtN(avgDaily,0)}` : '—';
   }
 
@@ -3248,16 +3264,16 @@ function renderClientSum(){
       const bids=getProjectBids(sh.pid);
       const rows=DAILY.filter(d=>bids.includes(d.bid)&&d.dt.startsWith(selMonth));
       const pct=sh.pct/100;
-      rtot+=sumRevenue(rows)*pct;
-      ctot+=sumCost(rows)*pct;
-      const daySet=[...new Set(rows.map(d=>d.dt))];
-      if(daySet.length){
-        hrDays+=daySet.length;
-        hrSum+=daySet.reduce((s,dt)=>{
-          const dr=rows.filter(d=>d.dt===dt);
-          return s+dr.reduce((ss,d)=>ss+(d.hr_daily||0),0)*pct;
-        },0);
-      }
+      // 按日期分组用 calcGroup，避免多矿池重复计算冷塔
+      const dayMap=new Map();
+      rows.forEach(d=>{if(!dayMap.has(d.dt))dayMap.set(d.dt,[]);dayMap.get(d.dt).push(d);});
+      dayMap.forEach((recs,dt)=>{
+        const c=calcGroup(recs,sh.pid);
+        rtot+=c.rev*pct;
+        ctot+=c.cost*pct;
+        hrSum+=c.hr_daily*pct;
+        hrDays++;
+      });
     });
     const hravg=hrDays?hrSum/hrDays:0;
     return`<tr>
@@ -3605,7 +3621,6 @@ async function delBox(id){
   saveData();renderBaseTable();
 }
 function editCoolMeter(id){
-  if(!IS_LOGGED_IN)return;
   if(!IS_LOGGED_IN)return;
   const m=COOL_METERS.find(x=>x.id===id);if(!m)return;
   _editCoolId=id;
@@ -4224,6 +4239,7 @@ function doExportSelected(){
   if(document.getElementById('exp-cfg').checked)exportCfgData(pid);
   if(document.getElementById('exp-cool').checked)exportCoolData(pid);
   if(document.getElementById('exp-pay').checked)exportPayData(pid);
+  if(document.getElementById('exp-pay').checked)exportPayData(pid);
 }
 function doExportAll(){
   const from=document.getElementById('exp-from').value;
@@ -4329,7 +4345,10 @@ function buildDashboardRows(pidFilter){
   const days = [...new Set(periodData.map(d=>d.dt))];
   const totBtc  = sumBtc(periodData);
   const totRev  = sumRevenue(periodData);
-  const totCost = sumCost(periodData);
+  // 按日期+项目分组后用 calcGroup，避免多矿池重复计算冷塔（与仪表盘逻辑一致）
+  const _expGroups=new Map();
+  periodData.forEach(d=>{const box=BOXES.find(b=>b.id===d.bid)||{};const k=d.dt+'|'+(box.pid||'');if(!_expGroups.has(k))_expGroups.set(k,{projId:box.pid||'',records:[]});_expGroups.get(k).records.push(d);});
+  const totCost=[..._expGroups.values()].reduce((s,{projId,records})=>s+calcGroup(records,projId).cost,0);
   const margin  = totRev>0 ? +((totRev-totCost)/totRev*100).toFixed(1) : 0;
   rows.push(['本期产出 BTC',  +totBtc.toFixed(8), 'BTC']);
   rows.push(['本期收益',      +totRev.toFixed(2),          'USD']);
@@ -4353,7 +4372,9 @@ function buildDashboardRows(pidFilter){
     const pDays = [...new Set(pData.map(d=>d.dt))];
     const pBtc  = sumBtc(pData);
     const pRev  = sumRevenue(pData);
-    const pCost = sumCost(pData);
+    const _pGroups=new Map();
+    pData.forEach(d=>{const k=d.dt;if(!_pGroups.has(k))_pGroups.set(k,{projId:proj.id,records:[]});_pGroups.get(k).records.push(d);});
+    const pCost=[..._pGroups.values()].reduce((s,{projId,records})=>s+calcGroup(records,projId).cost,0);
     const pProfit = pRev-pCost;
     const pMargin = pRev>0?+((pProfit/pRev)*100).toFixed(1):0;
     // 日均自有算力
@@ -5376,10 +5397,11 @@ function mergeSelectedPayments(){
   renderElecPay();
 }
 // 解散合并组（只删组定义，保留各项目的 PAYMENT 记录）
-function dissolveCustomGroup(gid){
+async function dissolveCustomGroup(gid){
   if(!confirm('确认解散此合并组？\n各项目的结算周期记录仍会保留，只是不再合并展示。'))return;
   _epCustomGroups=_epCustomGroups.filter(g=>g.gid!==gid);
-  renderElecPay();
+  await _sbDeleteById('payment_groups',gid);
+  saveData();renderElecPay();
 }
 // 向后兼容
 function splitCustomGroup(gid){dissolveCustomGroup(gid);}
@@ -5522,9 +5544,12 @@ function saveBatchPay(){
   _epCustomGroups=_epCustomGroups.map(g=>({...g,payIds:g.payIds.filter(id=>!payIds.includes(id))})).filter(g=>g.payIds.length>=1);
 
   const gid=_batchEditGid||('cg_'+Date.now());
-  _epCustomGroups.push({gid,payIds:[...payIds],label:note||''});
+  const newGrp={gid,payIds:[...payIds],label:note||''};
+  _epCustomGroups.push(newGrp);
   _batchEditGid=null;
-
+  // 立即同步合并组到 Supabase
+  _sbUpsert('payment_groups',[_J2D.paymentGroup(newGrp)]);
+  saveData();
   setEpMode('combined');
   closeM('m-batch-pay');
   renderElecPay();
@@ -6065,13 +6090,15 @@ function confirmPaid(){
     const pay=PAYMENTS.find(p=>p.id===_markPaidId);
     if(pay){pay.paid=true;pay.paid_date=d;pay.paid_note=note;snapshotPay(pay);}
   }
+  saveData();scheduleSbSync();
   closeM('m-mark-paid');renderElecPay();
 }
-function unmarkPaid(id){
+async function unmarkPaid(id){
   if(!IS_LOGGED_IN)return;
   if(!confirm('确认撤销支付状态？'))return;
   const pay=PAYMENTS.find(p=>p.id===id);
   if(pay){pay.paid=false;pay.paid_date='';pay.paid_note='';}
+  saveData();scheduleSbSync();
   renderElecPay();
 }
 // 支付日期 / 备注 内联直接修改
@@ -6282,7 +6309,7 @@ async function loadFromSupabase(){
       if(sh.length)SHARES=sh.map(_D2J.share);
       if(dy.length)DAILY=dy.map(_D2J.daily);
       if(cm.length)COOL_METERS=cm.map(_D2J.coolMeter);
-      if(pg.length)_epCustomGroups=pg.map(_D2J.paymentGroup);
+      _epCustomGroups=pg.length?pg.map(_D2J.paymentGroup):[];
       console.log('[Supabase] ✓ 数据加载完成，日报',dy.length,'条');
     }else{
       console.log('[Supabase] 云端暂无数据，使用本地缓存');
